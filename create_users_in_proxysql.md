@@ -1,23 +1,18 @@
 # Template Description
 
-This template is to be used when you need to create a new mysql user in an existing environment. This should be able to be used for all types of MySQL including Percona, MariaDB, MySQL community, IGR, PXC, Galera, etc.
-
-This template assumes that the user needs to be available on all hosts in the topology/cluster. If this use is only supposed to be created on a single machine you will need to add steps to limit the creation by disbaling sql_log_bin and only running the create user statement on the host where the user should be created.
+This template is used for creating a new ProxySQL MySQL user in an existing environment. It supports all types of MySQL, including Percona, MariaDB, MySQL Community, IGR, PXC, Galera, and others.
 
 # Tags
 
 - {ticket_number} = The ticket number for this implementation
 - {client_ssh_ms_connect_name} = The identifier that you would use to connect to the this client using ssh_ms connect
-- {new_mysql_user_username} = The username portion of the new user. Example '**user**'@'host'
-- {new_mysql_user_host} = The host portion of the new user. Example 'user'@'**host**'
-- {new_mysql_user_grants} = The grants for the new user. This should be the full grant scope. Example: ALL on *.*
-- {mysql_source_host} = The source / writer host for the topology
-- {mysql_source_host_ip_address} = The IP address of the source / writer host for the topology
-- {mysql_source_host_port} = The port of the source / writer host for the topology
+- {mysql_source_host} = The source/writer host for the topology
+- {proxysql_host} = The proxysql in question
+- {user} = The Proxysql to be created
 
 # Description of Work
 
-Create mysql user '{new_mysql_user_username}'@'{new_mysql_user_host}'
+Create a user in Proxysql.
 
 # Estimated Time Requirement
 
@@ -25,7 +20,7 @@ A block of 30 minutes will be required in our maintenance calendar for this task
 
 # Expected Impact
 
-There is no expected performance impact or downtime on database hosts for this task.
+This task has no expected performance impact or downtime on database hosts.
 
 # Implementation Plan
 
@@ -35,21 +30,38 @@ There is no expected performance impact or downtime on database hosts for this t
 ```bash
 db_tree
 
-# NOTE: This is to confirm which host is the writer / source host as this is where you will need to create the user
+# NOTE: This is to confirm which host is the writer/source host as this is where you will need to create the user
 ```
-
-- Does user already exist?
+- Proxysql servers
 ```bash
-# For all hosts in the environment
+db_connect --list | grep -i proxysql  # For GASCAN
+db_connect | grep proxysql            # For MSP
 
-db_connect <host> 
-select count(*) from mysql.user where user = '{new_mysql_user_username}' and host = '{new_mysql_user_host}'
-
-# Note: Should return 0. This is to confirm that the user does not already exist on any of the nodes. We will create the user using
-# create user if not exists, but we should still check to make sure the user does not exist as, if the use exists,
-# then this request may be invalid.
-# In short, if the user exists stop here and report it to the client
+# NOTE: This command will show you how many proxysql servers the customer has
 ```
+
+- Does the user already exist?
+```bash
+db_connect <host> 
+select count(*) from mysql.user where user = '{new_mysql_user_username}'
+
+ssh_connect {proxysql_host}
+mysql -e "select * from mysql_users"
+
+# Note: In Proxysql, it should return 0. This confirms that the user does not already exist on any of the nodes.
+# We will create the user in Proxysql by inserting the necessary row/s 
+# If the user exists, stop here and report it to the client
+```
+- mysql_hostgroups
+```bash
+ssh_connect {proxysql_host}
+mysql -e "select * from mysql_replication_hostgroups"   # For async replication
+mysql -e "select * from mysql_galera_hostgroups"        # For PXC/Galera setup 
+
+# Note: The check will show you which is the writer and reader hostgroups
+# We will use these values when creating the users in Proxysql
+```
+
 
 ## Work Steps
 
@@ -58,37 +70,32 @@ select count(*) from mysql.user where user = '{new_mysql_user_username}' and hos
     ssh_ms connect {client_ssh_ms_connect_name}
     mkdir -p ~/{ticket_number}/
     cd ~/{ticket_number}
-    screen -SL {ticket_number}-create-mysql-user
+    screen -SL {ticket_number}-create-proxysql-user
     ```
-
-1) Generate a strong password and save this on the monitor host so that it can be retrieved by the client
+1) Connect to the database instance and get the user info
     ```bash
-    tr -dc 'A-Za-z0-9!?%=' < /dev/urandom | head -c 20 > ./{new_mysql_user_username}_{new_mysql_user_host}_generated_password.txt
-    cat ./generated_password.txt
-    ```
+    db_connect {mysql_source_host}
+    SELECT DISTINCT CONCAT("INSERT INTO mysql_users (username, password, default_hostgroup) VALUES (", CONCAT("'",User,"'"),","  ,CONCAT("'," authentication_string,"',"",2") ,");")
+    from mysql.user WHERE user = '{user}';
 
-1) Create the user on {mysql_source_host}
+    # This command will generate a statement like this
+    INSERT INTO mysql_users (username,password, default_hostgroup) VALUES ('{user}','*197807CBFABA0820A315792313EB15F917DFQAC',2);
+
+    # Change the default_hostgroup with the writer hostgroup obtained in the preflight section
+    ```   
+
+1) Connect to the proxysql, create the user, load to runtime,  save it to disk, and verify
     ```bash
-    mysql -h {mysql_source_host_ip_address} -P {mysql_source_host_port} -e "create user if not exists '{new_mysql_user_username}'@'{new_mysql_user_host}' identified by '<password generated in previous step>'";
-
-    # Note: In the event that you need to create a password using the native mysql password hashing method, please replace "identified by" with "identified with mysql_native_password by"
+    ssh_connect {proxysql_host}
+    mysql
+    INSERT INTO mysql_users (username,password, default_hostgroup) VALUES ('percona','*197807CBFABA0820A315792313EB15F917DFQAC',2);
+    LOAD MYSQL USERS TO RUNTIME;
+    SAVE MYSQL USERS TO DISK;
+    SELECT * FROM mysql_users WHERE username='{user}';
+    SELECT * FROM runtime_mysql_users WHERE username='{user}';
     ```
 
-1) Provide grants to the new user
-    ```bash
-    mysql -h {mysql_source_host_ip_address} -P {mysql_source_host_port} -e "grant {new_mysql_user_grants} to '{new_mysql_user_username}'@'{new_mysql_user_host}'"
-
-    # Note: Dependng on the grant you may need to include "with grant option" at the end
-    ```
-
-1) Confirm that the new user exists
-    ```bash
-    # For all hosts in the environment
-    db_connect <host>
-    SHOW GRANTS FOR '{new_mysql_user_username}'@'{new_mysql_user_host}'
-    ```
-
-1) Inform the client that the password can be found on the monitor host in file ~/{ticket_number}/{new_mysql_user_username}_{new_mysql_user_host}_generated_password.txt. Delete this file as soon as the client has confirmed that the password has been collected. If the customer is not able to reach the monitor host, please ask for the password in their slack channel and we will find a way to provide it to them
+1) Inform the client that the user was created
 
 # ROLLBACK
 
@@ -100,18 +107,21 @@ select count(*) from mysql.user where user = '{new_mysql_user_username}' and hos
     screen -SL {ticket_number}-create-mysql-user-rollback
     ```
 
-1) Drop the user on {mysql_source_host} and let it propogate via replication
+1) Connect to the Proxysql server, delete the user created, load to runtime, save it to disk, and verify
     ```bash
-    mysql -h {mysql_source_host_ip_address} -P {mysql_source_host_port} -e "drop user if exists '{new_mysql_user_username}'@'{new_mysql_user_host}'";
+    ssh_connect {proxysql_host}
+    mysql
+    DELETE FROM mysql_users WHERE username = '{user}';
+    LOAD MYSQL USERS TO RUNTIME;
+    SAVE MYSQL USERS TO DISK;
+    SELECT * FROM mysql_users WHERE username = '{user}';
     ```
 
 1) Confirm the user has been removed
     ```bash
-    # For all hosts in the environment
-
-    db_connect <host> 
-    select count(*) from mysql.user where user = '{new_mysql_user_username}' and host = '{new_mysql_user_host}'
-
+    ssh_connect {proxysql_host}
+    mysql
+    SELECT * FROM mysql_users WHERE username = {user};    
     # NOTE: Should return zero
     ```
 
