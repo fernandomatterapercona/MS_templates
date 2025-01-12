@@ -5,7 +5,7 @@ This template is used for creating a new ProxySQL MySQL user in an existing envi
 # Tags
 
 - {ticket_number} = The ticket number for this implementation
-- {client_ssh_ms_connect_name} = The identifier that you would use to connect to the this client using ssh_ms connect
+- {client_ssh_ms_connect_name} = The identifier that you would use to connect to this client using ssh_ms connect
 - {mysql_source_host} = The source/writer host for the topology
 - {proxysql_host} = The proxysql in question
 - {user} = The Proxysql to be created
